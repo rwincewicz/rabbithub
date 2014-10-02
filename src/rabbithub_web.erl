@@ -538,15 +538,53 @@ extract_message(ExchangeResource, ParsedQuery, Req) ->
                          [{'content_type', ContentTypeBin},{'delivery_mode',DeliveryMode}],
                          Body).
 
+extract_linkheader_message(ExchangeResource, ParsedQuery, Req) ->
+    LinkHeader = Req:get_header_value("Link"),
+    case LinkHeader of
+        undefined ->
+            rabbit_log:info("No link header provided"),
+            Req:respond({400, [], "ResourceSync Link Headers Required"});
+        _ ->
+            %%rabbit_log:info("Link header: ~p~n", [LinkHeader]),
+            Regex = re:run(LinkHeader, "<(http:\/\/.*)>\s*;\s*rel\s*=\s*.*[\"|']?self"),
+            case Regex of
+                nomatch ->
+                    rabbit_log:info("No match found!"),
+                    Req:respond({400, [], "ResourceSync Link Headers Required"});
+                _ ->
+                    %%rabbit_log:info("Match found!~n"),
+                    {match, [{_,_},{X,Y}]} = re:run(LinkHeader, "<(http:\/\/.*)>\s*;\s*rel\s*=\s*.*[\"|']?self"),
+                    %%rabbit_log:info("Match position: ~p, ~p~n", [X, Y]),
+                    RoutingKey = string:substr(LinkHeader, X+1, Y),
+                    rabbit_log:info("Routing key: ~p~n", [RoutingKey]),
+                    DeliveryMode = get_msg_delivery_mode(param(ParsedQuery, "hub.persistmsg", "0")),
+                    ContentTypeBin = case Req:get_header_value("content-type") of
+                        undefined -> undefined;
+                        S -> list_to_binary(S)
+                    end,
+                Body = Req:recv_body(),
+                %%  rabbit_log:info("RabbitHub message delivery mode: ~p~n", [DeliveryMode]),
+                 rabbit_basic:message(ExchangeResource,
+                         list_to_binary(RoutingKey),
+                         [{'content_type', ContentTypeBin},{'delivery_mode',DeliveryMode}],
+                         Body)
+            end
+        end.
+
 perform_request('POST', endpoint, '', exchange, Resource, ParsedQuery, Req) ->
-    Msg = extract_message(Resource, ParsedQuery, Req),
-    Delivery = rabbit_basic:delivery(false, false, Msg, undefined),
-    case rabbit_basic:publish(Delivery) of
-        {ok,  _} ->
-            Req:respond({202, [], []});
-        {error, not_found} ->
-            Req:not_found()
-    end;
+    Msg = case Req:get_header_value("Link") of
+        undefined ->
+            extract_message(Resource, ParsedQuery, Req);
+        _ ->
+            extract_linkheader_message(Resource, ParsedQuery, Req)
+        end,
+        Delivery = rabbit_basic:delivery(false, false, Msg, undefined),
+        case rabbit_basic:publish(Delivery) of
+            {ok,  _} ->
+                Req:respond({204, [], []});
+            {error, not_found} ->
+                Req:respond({404, [], []})
+        end;
 
 perform_request('POST', endpoint, '', queue, Resource, ParsedQuery, Req) ->
     Msg = extract_message(rabbithub:r(exchange, ""), ParsedQuery, Req),
